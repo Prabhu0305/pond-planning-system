@@ -1,32 +1,9 @@
-"""
-app.py
-
-Day 4 goal: wrap the full pipeline (parse KML -> build DEM -> fill
-depressions -> flow direction -> flow accumulation -> pond site ->
-catchment) into a single Flask API endpoint.
-
-Endpoint: POST /analyzeContour
-  - Accepts an uploaded .kml file (multipart/form-data, field name "file")
-  - Returns catchment analysis results as JSON
-
-VIVA POINT: this endpoint does NOT hardcode anything about the sample
-village. Every result (pond location, catchment area, elevation stats) is
-computed fresh from whatever KML file is uploaded -- feed it a different
-village's contour file and it derives different results, which is exactly
-what the assignment requires ("no hardcoding, must generalize").
-"""
-
 import os
 import sys
 import tempfile
+import zipfile
 
 from flask import Flask, request, jsonify
-
-# The analysis/*.py files were written to be run standalone (e.g.
-# "python analysis/dem_builder.py"), and they import each other using
-# plain names like "from kml_parser import ...". To reuse them here in
-# app.py without rewriting them, we add the analysis/ folder itself to
-# Python's search path, so those same plain imports keep working.
 ANALYSIS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis")
 sys.path.insert(0, ANALYSIS_DIR)
 
@@ -43,6 +20,24 @@ from terrain_flow import (                          # noqa: E402
 import numpy as np
 
 app = Flask(__name__)
+
+
+def extract_kml_from_kmz(kmz_path):
+
+    with zipfile.ZipFile(kmz_path, "r") as archive:
+        kml_names = [n for n in archive.namelist() if n.lower().endswith(".kml")]
+        if not kml_names:
+            raise ValueError("This .kmz file does not contain any .kml file inside it.")
+
+        # A KMZ conventionally has a main "doc.kml" -- prefer that if present,
+        # otherwise just take the first .kml found.
+        chosen_name = next((n for n in kml_names if os.path.basename(n).lower() == "doc.kml"), kml_names[0])
+
+        extracted_bytes = archive.read(chosen_name)
+
+    with tempfile.NamedTemporaryFile(suffix=".kml", delete=False) as tmp:
+        tmp.write(extracted_bytes)
+        return tmp.name
 
 
 def estimate_cell_area_m2(grid_lons, grid_lats):
@@ -132,17 +127,31 @@ def analyze_contour():
     if uploaded_file.filename == "":
         return jsonify({"error": "Empty filename."}), 400
 
-    if not uploaded_file.filename.lower().endswith(".kml"):
-        return jsonify({"error": "Only .kml files are supported right now."}), 400
+    filename_lower = uploaded_file.filename.lower()
+    if not (filename_lower.endswith(".kml") or filename_lower.endswith(".kmz")):
+        return jsonify({"error": "Only .kml or .kmz files are supported."}), 400
+
+    is_kmz = filename_lower.endswith(".kmz")
 
     # Save the uploaded file to a temporary path so our existing
     # file-based parser can read it.
-    with tempfile.NamedTemporaryFile(suffix=".kml", delete=False) as tmp:
+    upload_suffix = ".kmz" if is_kmz else ".kml"
+    with tempfile.NamedTemporaryFile(suffix=upload_suffix, delete=False) as tmp:
         uploaded_file.save(tmp.name)
         tmp_path = tmp.name
 
+    kml_path = tmp_path
+    extracted_kml_path = None
+
     try:
-        result = run_full_analysis(tmp_path)
+        if is_kmz:
+            # A KMZ file is just a KML file zipped up (usually alongside
+            # images/icons). We extract the .kml that's inside it and
+            # point our existing parser at that instead.
+            extracted_kml_path = extract_kml_from_kmz(tmp_path)
+            kml_path = extracted_kml_path
+
+        result = run_full_analysis(kml_path)
         return jsonify(result), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -152,6 +161,8 @@ def analyze_contour():
         return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
     finally:
         os.remove(tmp_path)
+        if extracted_kml_path and os.path.exists(extracted_kml_path):
+            os.remove(extracted_kml_path)
 
 
 @app.route("/", methods=["GET"])
@@ -165,4 +176,4 @@ def index():
 if __name__ == "__main__":
     # host="0.0.0.0" makes it reachable from outside your own machine --
     # required later when this runs on the professor's server.
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=3000, debug=True)

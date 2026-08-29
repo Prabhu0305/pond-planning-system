@@ -1,4 +1,0 @@
-venv/
-__pycache__/
-*.pyc
-sample_data/dem_preview.png
