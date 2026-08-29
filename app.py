@@ -176,4 +176,4 @@ def index():
 if __name__ == "__main__":
     # host="0.0.0.0" makes it reachable from outside your own machine --
     # required later when this runs on the professor's server.
-    app.run(host="0.0.0.0", port=3000, debug=True)
+    app.run(host="0.0.0.0", port=3000, debug=False)
