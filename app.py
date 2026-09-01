@@ -120,10 +120,13 @@ def run_full_analysis(kml_file_path, resolution_m=10):
 
 @app.route("/analyzeContour", methods=["POST"])
 def analyze_contour():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded. Send it as form field 'file'."}), 400
+    if "contour_map" in request.files:
+        uploaded_file = request.files["contour_map"]
+    elif "file" in request.files:
+        uploaded_file = request.files["file"]
+    else:
+        return jsonify({"error": "No file uploaded. Send it as form field 'contour_map' or 'file'."}), 400
 
-    uploaded_file = request.files["file"]
     if uploaded_file.filename == "":
         return jsonify({"error": "Empty filename."}), 400
 
@@ -169,7 +172,7 @@ def analyze_contour():
 def index():
     return jsonify({
         "message": "Pond Catchment Analysis API is running.",
-        "endpoint": "POST /analyzeContour with a .kml file as form field 'file'",
+        "endpoint": "POST /analyzeContour with a .kml/.kmz file as form field 'contour_map' (or 'file')",
     })
 
 
