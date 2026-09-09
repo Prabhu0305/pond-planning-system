@@ -14,6 +14,7 @@ direction on a grid.
 
 import heapq
 import numpy as np
+from scipy import ndimage
 
 
 # The 8 neighbor directions: (row offset, col offset, distance).
@@ -173,6 +174,147 @@ def delineate_catchment(direction, pour_row, pour_col):
                     stack.append((nr, nc))
 
     return catchment
+
+
+def latlon_to_grid_index(lat, lon, grid_lats, grid_lons):
+    """
+    Converts a real-world (lat, lon) -- e.g. a point the admin clicked on
+    the map -- into the nearest row/col on our DEM grid.
+
+    VIVA POINT: our grid has fixed spacing (grid_lats, grid_lons are evenly
+    spaced arrays), so "nearest point" is just finding the closest value in
+    each array -- no complex geometry needed.
+    """
+    row = int(np.argmin(np.abs(grid_lats - lat)))
+    col = int(np.argmin(np.abs(grid_lons - lon)))
+    return row, col
+
+
+def estimate_pond_depth_and_storage(catchment_area_m2, pond_area_fraction=0.02,
+                                     min_depth_m=1.5, max_depth_m=4.0):
+    """
+    Provisional pond sizing, used before rainfall/runoff data is available.
+
+    ASSUMPTION (documented, not hidden): the pond's own footprint is
+    estimated as a small fraction of its catchment area -- 2% is a common
+    rough planning guideline for small farm/check-dam ponds relative to the
+    area draining into them. Depth is set to a typical small-pond range
+    (1.5m-4m), scaled mildly by catchment size (a bigger catchment can
+    reasonably support a somewhat deeper pond, within sensible bounds).
+
+    This is intentionally a simple, explainable placeholder -- once runoff
+    volume is available (Day 3), storage capacity should be cross-checked
+    against it rather than relying on this estimate alone.
+    """
+    pond_area_m2 = catchment_area_m2 * pond_area_fraction
+
+    # scale depth mildly with catchment size, clamped to a sensible range
+    size_factor = min(catchment_area_m2 / 50000, 1.0)  # saturates at 50,000 m2
+    recommended_depth_m = min_depth_m + size_factor * (max_depth_m - min_depth_m)
+
+    storage_capacity_m3 = pond_area_m2 * recommended_depth_m
+
+    return {
+        "pond_area_m2": round(pond_area_m2, 2),
+        "recommended_depth_m": round(recommended_depth_m, 2),
+        "storage_capacity_m3": round(storage_capacity_m3, 2),
+    }
+
+
+def identify_main_channel(accumulation, percentile=97):
+    """
+    Identifies the single dominant river/drainage channel: the largest
+    CONNECTED group of cells with very high flow accumulation.
+
+    VIVA POINT: this is different from just "all high-accumulation cells"
+    -- a threshold alone catches every minor tributary too. Taking the
+    LARGEST CONNECTED COMPONENT isolates the one genuinely dominant
+    channel, which is what we actually want to keep pond sites away from.
+    """
+    threshold = np.percentile(accumulation, percentile)
+    high_accum_mask = accumulation >= threshold
+
+    labeled, num_features = ndimage.label(high_accum_mask, structure=np.ones((3, 3)))
+    if num_features == 0:
+        return np.zeros_like(accumulation, dtype=bool)
+
+    sizes = ndimage.sum(high_accum_mask, labeled, range(1, num_features + 1))
+    main_channel_label = np.argmax(sizes) + 1
+    return labeled == main_channel_label
+
+
+def find_top_n_pond_sites(Z, accumulation, direction, n=4, low_elevation_percentile=25,
+                           edge_margin_fraction=0.08, min_catchment_cells=5,
+                           min_distance_from_channel_cells=20):
+    """
+    Finds up to N distinct candidate pond sites, ranked by flow accumulation
+    (highest first), each with its OWN, NON-OVERLAPPING catchment, and each
+    kept at a safe minimum distance from the identified main river channel.
+
+    SAFETY BUFFER (min_distance_from_channel_cells, default 20 cells =
+    ~200m at 10m grid resolution): even though a candidate might pass the
+    low-elevation and edge-margin filters, we additionally reject any
+    candidate too close to the main channel identified by
+    identify_main_channel(). This is a deliberate extra safeguard, not
+    just a consequence of the other filters -- it protects against
+    contour maps where those filters alone might not keep a safe distance.
+    """
+    rows, cols = Z.shape
+    row_margin = max(int(rows * edge_margin_fraction), 1)
+    col_margin = max(int(cols * edge_margin_fraction), 1)
+
+    interior_mask = np.zeros_like(Z, dtype=bool)
+    interior_mask[row_margin:rows - row_margin, col_margin:cols - col_margin] = True
+
+    # Distance (in cells) from every cell to the nearest main-channel cell,
+    # computed once via a fast distance transform rather than a slow
+    # per-candidate loop.
+    main_channel_mask = identify_main_channel(accumulation)
+    if main_channel_mask.any():
+        distance_from_channel = ndimage.distance_transform_edt(~main_channel_mask)
+    else:
+        distance_from_channel = np.full_like(Z, np.inf)  # no channel found, no restriction
+
+    safe_from_channel_mask = distance_from_channel >= min_distance_from_channel_cells
+
+    threshold = np.percentile(Z[interior_mask], low_elevation_percentile)
+    candidate_mask = interior_mask & (Z <= threshold) & safe_from_channel_mask
+
+    candidate_rows, candidate_cols = np.where(candidate_mask)
+    if len(candidate_rows) == 0:
+        return []  # nothing survives the filters -- caller should handle empty result
+
+    candidate_accum = accumulation[candidate_rows, candidate_cols]
+    order = np.argsort(-candidate_accum)
+
+    used_mask = np.zeros_like(Z, dtype=bool)
+    sites = []
+
+    for idx in order:
+        if len(sites) >= n:
+            break
+
+        row, col = candidate_rows[idx], candidate_cols[idx]
+        if used_mask[row, col]:
+            continue
+
+        catchment = delineate_catchment(direction, row, col)
+
+        if catchment.sum() < min_catchment_cells:
+            continue
+
+        sites.append({
+            "row": int(row),
+            "col": int(col),
+            "elevation": float(Z[row, col]),
+            "accumulation": float(accumulation[row, col]),
+            "catchment_mask": catchment,
+            "catchment_cell_count": int(catchment.sum()),
+            "distance_from_main_channel_m": round(float(distance_from_channel[row, col]) * 10, 1),
+        })
+        used_mask |= catchment
+
+    return sites
 
 
 if __name__ == "__main__":
