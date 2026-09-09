@@ -4,6 +4,12 @@ import tempfile
 import zipfile
 
 from flask import Flask, request, jsonify
+
+# The analysis/*.py files were written to be run standalone (e.g.
+# "python analysis/dem_builder.py"), and they import each other using
+# plain names like "from kml_parser import ...". To reuse them here in
+# app.py without rewriting them, we add the analysis/ folder itself to
+# Python's search path, so those same plain imports keep working.
 ANALYSIS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis")
 sys.path.insert(0, ANALYSIS_DIR)
 
@@ -13,8 +19,8 @@ from terrain_flow import (                          # noqa: E402
     fill_depressions,
     compute_flow_direction,
     compute_flow_accumulation,
-    find_pour_point,
-    delineate_catchment,
+    find_top_n_pond_sites,
+    estimate_pond_depth_and_storage,
 )
 
 import numpy as np
@@ -23,7 +29,11 @@ app = Flask(__name__)
 
 
 def extract_kml_from_kmz(kmz_path):
-
+    """
+    A .kmz file is just a .zip archive that contains a .kml file inside
+    (plus, sometimes, images/icons). This finds the .kml inside and
+    extracts it to a temporary file, returning that file's path.
+    """
     with zipfile.ZipFile(kmz_path, "r") as archive:
         kml_names = [n for n in archive.namelist() if n.lower().endswith(".kml")]
         if not kml_names:
@@ -59,10 +69,18 @@ def estimate_cell_area_m2(grid_lons, grid_lats):
     return abs(cell_width_m * cell_height_m)
 
 
-def run_full_analysis(kml_file_path, resolution_m=10):
+def run_full_analysis(kml_file_path, resolution_m=10, num_sites=4):
     """
     Runs the complete pipeline on a given KML file path and returns a
     plain Python dict, ready to be converted to JSON.
+
+    Returns up to `num_sites` distinct, ranked candidate pond locations,
+    each with its own non-overlapping catchment -- not just one "the"
+    answer. This matters in practice: the top-ranked site might turn out
+    to be unsuitable for reasons contour data alone can't capture (rocky
+    ground, existing farmland in active use, access constraints), so
+    having genuine alternatives ready means a field visit can substitute
+    the next-best option instead of starting over.
     """
     points, line_count = parse_contour_kml(kml_file_path)
 
@@ -79,16 +97,28 @@ def run_full_analysis(kml_file_path, resolution_m=10):
     direction = compute_flow_direction(Z_filled)
     accumulation = compute_flow_accumulation(Z_filled, direction)
 
-    pour_row, pour_col = find_pour_point(Z_filled, accumulation)
-    catchment_mask = delineate_catchment(direction, pour_row, pour_col)
-
     cell_area_m2 = estimate_cell_area_m2(grid_lons, grid_lats)
-    catchment_cell_count = int(catchment_mask.sum())
-    catchment_area_m2 = catchment_cell_count * cell_area_m2
 
-    pond_lat = float(grid_lats[pour_row])
-    pond_lon = float(grid_lons[pour_col])
-    pond_elevation = float(Z_filled[pour_row, pour_col])
+    raw_sites = find_top_n_pond_sites(Z_filled, accumulation, direction, n=num_sites)
+
+    pond_sites = []
+    for rank, site in enumerate(raw_sites, start=1):
+        catchment_area_m2 = site["catchment_cell_count"] * cell_area_m2
+        sizing = estimate_pond_depth_and_storage(catchment_area_m2)
+
+        pond_sites.append({
+            "rank": rank,
+            "latitude": float(grid_lats[site["row"]]),
+            "longitude": float(grid_lons[site["col"]]),
+            "elevation_m": site["elevation"],
+            "distance_from_main_channel_m": site["distance_from_main_channel_m"],
+            "catchment": {
+                "cell_count": site["catchment_cell_count"],
+                "cell_area_m2": round(cell_area_m2, 2),
+                "catchment_area_m2": round(catchment_area_m2, 2),
+            },
+            "pond_sizing": sizing,
+        })
 
     return {
         "input_summary": {
@@ -100,20 +130,16 @@ def run_full_analysis(kml_file_path, resolution_m=10):
             "dem_grid_shape": {"rows": int(Z.shape[0]), "cols": int(Z.shape[1])},
             "dem_resolution_m": resolution_m,
         },
-        "pond_site": {
-            "latitude": pond_lat,
-            "longitude": pond_lon,
-            "elevation_m": pond_elevation,
-        },
-        "catchment": {
-            "cell_count": catchment_cell_count,
-            "cell_area_m2": round(cell_area_m2, 2),
-            "catchment_area_m2": round(catchment_area_m2, 2),
-        },
+        "pond_sites": pond_sites,
         "notes": (
-            "Pond site and catchment are derived automatically from the "
-            "uploaded contour data. Nothing here is hardcoded to a "
-            "specific village."
+            f"Returned {len(pond_sites)} distinct, non-overlapping candidate pond "
+            "sites, ranked by flow accumulation (highest first = most natural water "
+            "collection). Multiple sites are provided because terrain data alone "
+            "cannot capture ground conditions like rock composition or existing land "
+            "use -- if the top-ranked site proves unsuitable on inspection, the next "
+            "ranked site is a genuine, independent alternative. All results are "
+            "derived automatically from the uploaded contour data; nothing is "
+            "hardcoded to a specific village."
         ),
     }
 
@@ -125,7 +151,10 @@ def analyze_contour():
     elif "file" in request.files:
         uploaded_file = request.files["file"]
     else:
-        return jsonify({"error": "No file uploaded. Send it as form field 'contour_map' or 'file'."}), 400
+        return jsonify({
+            "error": "No file uploaded. Send it as form field 'contour_map' "
+                     "(or 'file' for backward compatibility)."
+        }), 400
 
     if uploaded_file.filename == "":
         return jsonify({"error": "Empty filename."}), 400
@@ -168,15 +197,24 @@ def analyze_contour():
             os.remove(extracted_kml_path)
 
 
+@app.route("/planner", methods=["GET"])
+def planner():
+    template_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "templates", "planner.html"
+    )
+    with open(template_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({
         "message": "Pond Catchment Analysis API is running.",
-        "endpoint": "POST /analyzeContour with a .kml/.kmz file as form field 'contour_map' (or 'file')",
+        "endpoint": "POST /analyzeContour with a .kml or .kmz file as form field 'contour_map'",
+        "frontend": "GET /planner for the interactive tool",
     })
 
 
 if __name__ == "__main__":
-    # host="0.0.0.0" makes it reachable from outside your own machine --
-    # required later when this runs on the professor's server.
     app.run(host="0.0.0.0", port=3000, debug=False)

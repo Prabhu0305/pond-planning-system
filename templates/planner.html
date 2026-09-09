@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pond Site Finder</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #EFEDE3;
+    --paper-deep: #E4E1D3;
+    --ink: #2B2420;
+    --ink-soft: #5C544C;
+    --rule: #C9C3B3;
+    --water: #1F6F78;
+    --water-deep: #16535A;
+    --clay: #A9642A;
+    --moss: #4C6B3E;
+    --brick: #A63D2F;
+    --paper-rgb: 239, 237, 227;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Public Sans', sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  h1, h2, .numeral {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  a { color: var(--water-deep); }
+
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 5rem;
+  }
+
+  header.hero {
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 2rem;
+    margin-bottom: 2.25rem;
+  }
+
+  .mark {
+    font-family: 'Public Sans', sans-serif;
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    color: var(--water-deep);
+    margin: 0 0 1rem;
+  }
+
+  h1 {
+    font-size: 2.15rem;
+    line-height: 1.15;
+    margin: 0 0 0.75rem;
+    max-width: 20ch;
+  }
+
+  .lede {
+    font-size: 1.05rem;
+    color: var(--ink-soft);
+    max-width: 46ch;
+    margin: 0 0 1.75rem;
+  }
+
+  .upload-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  .file-btn {
+    position: relative;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: transparent;
+    border: 1px solid var(--ink);
+    color: var(--ink);
+    padding: 0.7rem 1.1rem;
+    font-family: 'Public Sans', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .file-btn:hover { background: rgba(43,36,32,0.06); }
+  .file-btn input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .filename {
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  button.analyze {
+    background: var(--water);
+    color: #fff;
+    border: none;
+    padding: 0.75rem 1.4rem;
+    font-family: 'Public Sans', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 700;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  button.analyze:hover:not(:disabled) { background: var(--water-deep); }
+  button.analyze:disabled { background: var(--rule); color: var(--ink-soft); cursor: not-allowed; }
+
+  button.analyze:focus-visible,
+  .file-btn:focus-within {
+    outline: 2px solid var(--water-deep);
+    outline-offset: 2px;
+  }
+
+  .hint {
+    font-size: 0.85rem;
+    color: var(--ink-soft);
+    margin-top: 0.6rem;
+  }
+
+  #status {
+    margin-top: 1.5rem;
+    font-size: 0.95rem;
+    display: none;
+  }
+  #status.visible { display: block; }
+  #status.loading { color: var(--ink-soft); }
+  #status.error {
+    color: var(--brick);
+    border-left: 3px solid var(--brick);
+    padding-left: 0.85rem;
+  }
+
+  #results { display: none; }
+  #results.visible { display: block; }
+
+  #map {
+    width: 100%;
+    height: 360px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    margin-bottom: 2.25rem;
+    background: var(--paper-deep);
+  }
+
+  .summary-line {
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    margin: -1.5rem 0 2rem;
+  }
+
+  h2.section-title {
+    font-size: 1.3rem;
+    margin: 0 0 0.35rem;
+  }
+
+  .section-note {
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    margin: 0 0 1.5rem;
+    max-width: 56ch;
+  }
+
+  .site-entry {
+    display: grid;
+    grid-template-columns: 3.2rem 1fr;
+    gap: 1rem;
+    padding: 1.4rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  .site-entry:last-child { border-bottom: 1px solid var(--rule); }
+
+  .site-entry .numeral {
+    font-size: 2.1rem;
+    line-height: 1;
+    color: var(--ink-soft);
+  }
+  .site-entry.rank-1 .numeral { color: var(--moss); }
+
+  .site-entry .site-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
+
+  .site-entry .site-head strong {
+    font-size: 1.05rem;
+  }
+
+  .badge {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--moss);
+    border: 1px solid var(--moss);
+    border-radius: 3px;
+    padding: 0.1rem 0.45rem;
+  }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.5rem 1.5rem;
+    font-size: 0.9rem;
+  }
+
+  .stat-grid dt {
+    color: var(--ink-soft);
+    font-size: 0.8rem;
+  }
+  .stat-grid dd {
+    margin: 0;
+    font-weight: 600;
+  }
+
+  .coords {
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    margin-top: 0.6rem;
+  }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+  }
+
+  @media (max-width: 480px) {
+    h1 { font-size: 1.7rem; }
+    .site-entry { grid-template-columns: 2.4rem 1fr; }
+    .site-entry .numeral { font-size: 1.6rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="mark">POND SITE FINDER</p>
+    <h1>Where should this village build its next pond?</h1>
+    <p class="lede">Upload a contour map. The terrain tells you where water already wants to collect &mdash; this finds those places, and the land draining into each one.</p>
+
+    <form id="upload-form">
+      <div class="upload-row">
+        <label class="file-btn">
+          <span id="file-btn-label">Choose contour file</span>
+          <input type="file" id="file-input" accept=".kml,.kmz" aria-label="Choose a KML or KMZ contour file">
+        </label>
+        <span class="filename" id="filename-display"></span>
+        <button type="submit" class="analyze" id="analyze-btn" disabled>Find pond sites</button>
+      </div>
+      <p class="hint">Accepts .kml or .kmz contour files, 1m interval or similar.</p>
+    </form>
+
+    <p id="status" role="status" aria-live="polite"></p>
+  </header>
+
+  <div id="results">
+    <div id="map"></div>
+    <p class="summary-line" id="summary-line"></p>
+
+    <h2 class="section-title">Ranked sites</h2>
+    <p class="section-note">Each site drains its own separate area of land &mdash; none of these catchments overlap. If the top site turns out to be unsuitable on inspection, the next one is a genuine, independent alternative, not a variation of the same spot.</p>
+
+    <div id="site-list"></div>
+  </div>
+
+  <footer>
+    Results are a preliminary planning estimate derived from the uploaded contour data &mdash; not a substitute for a field survey or civil engineering assessment.
+  </footer>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+(function () {
+  "use strict";
+
+  var fileInput = document.getElementById("file-input");
+  var fileBtnLabel = document.getElementById("file-btn-label");
+  var filenameDisplay = document.getElementById("filename-display");
+  var analyzeBtn = document.getElementById("analyze-btn");
+  var form = document.getElementById("upload-form");
+  var statusEl = document.getElementById("status");
+  var resultsEl = document.getElementById("results");
+  var summaryLine = document.getElementById("summary-line");
+  var siteList = document.getElementById("site-list");
+  var map = null;
+  var markers = [];
+
+  function setStatus(message, kind) {
+    statusEl.textContent = message || "";
+    statusEl.className = message ? "visible " + (kind || "") : "";
+  }
+
+  function resetResults() {
+    resultsEl.classList.remove("visible");
+    siteList.innerHTML = "";
+    summaryLine.textContent = "";
+  }
+
+  fileInput.addEventListener("change", function () {
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      filenameDisplay.textContent = "";
+      analyzeBtn.disabled = true;
+      return;
+    }
+    var lower = file.name.toLowerCase();
+    if (!lower.endsWith(".kml") && !lower.endsWith(".kmz")) {
+      setStatus("That file isn't a .kml or .kmz contour file. Choose a different file.", "error");
+      filenameDisplay.textContent = "";
+      analyzeBtn.disabled = true;
+      fileInput.value = "";
+      return;
+    }
+    setStatus("", "");
+    filenameDisplay.textContent = file.name;
+    analyzeBtn.disabled = false;
+  });
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      setStatus("Choose a contour file first.", "error");
+      return;
+    }
+
+    analyzeBtn.disabled = true;
+    fileInput.disabled = true;
+    resetResults();
+    setStatus("Analyzing contours \u2014 this can take up to 15 seconds for detailed maps.", "loading");
+
+    var formData = new FormData();
+    formData.append("contour_map", file);
+
+    fetch("/analyzeContour", { method: "POST", body: formData })
+      .then(function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, data: data };
+        }).catch(function () {
+          throw new Error("The server sent back something that wasn't valid data. Try again.");
+        });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          var message = (result.data && result.data.error) ? result.data.error : "Something went wrong analyzing this file.";
+          setStatus(message, "error");
+          return;
+        }
+        setStatus("", "");
+        renderResults(result.data);
+      })
+      .catch(function (err) {
+        setStatus("Couldn't reach the analysis server. Check your connection and try again. (" + err.message + ")", "error");
+      })
+      .finally(function () {
+        analyzeBtn.disabled = false;
+        fileInput.disabled = false;
+      });
+  });
+
+  function renderResults(data) {
+    var sites = data.pond_sites || [];
+
+    if (sites.length === 0) {
+      setStatus("No suitable pond sites were found in this contour map.", "error");
+      return;
+    }
+
+    var summary = data.input_summary || {};
+    var elevRange = summary.elevation_range_m || {};
+    summaryLine.textContent = sites.length + " site" + (sites.length === 1 ? "" : "s") + " found \u00b7 " +
+      (summary.contour_lines_parsed || "?") + " contour lines \u00b7 elevation " +
+      (elevRange.min !== undefined ? elevRange.min : "?") + "\u2013" + (elevRange.max !== undefined ? elevRange.max : "?") + "m";
+
+    renderMap(sites);
+    renderList(sites);
+
+    resultsEl.classList.add("visible");
+    resultsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function renderMap(sites) {
+    var avgLat = sites.reduce(function (s, p) { return s + p.latitude; }, 0) / sites.length;
+    var avgLon = sites.reduce(function (s, p) { return s + p.longitude; }, 0) / sites.length;
+
+    if (map) {
+      markers.forEach(function (m) { map.removeLayer(m); });
+      markers = [];
+      map.setView([avgLat, avgLon], 14);
+    } else {
+      map = L.map("map").setView([avgLat, avgLon], 14);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+        maxZoom: 19
+      }).addTo(map);
+    }
+
+    sites.forEach(function (site) {
+      var isTop = site.rank === 1;
+      var icon = L.divIcon({
+        className: "",
+        html: '<div style="' +
+          "width:28px;height:28px;border-radius:50%;" +
+          "background:" + (isTop ? "#4C6B3E" : "#1F6F78") + ";" +
+          "color:#fff;font-family:'Public Sans',sans-serif;font-weight:700;font-size:13px;" +
+          "display:flex;align-items:center;justify-content:center;" +
+          "border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.35);" +
+          '">' + site.rank + "</div>",
+        iconSize: [28, 28],
+        iconAnchor: [14, 14]
+      });
+
+      var marker = L.marker([site.latitude, site.longitude], { icon: icon }).addTo(map);
+      marker.bindPopup(
+        "<strong>Rank " + site.rank + "</strong><br>" +
+        "Elevation: " + site.elevation_m + "m<br>" +
+        "Catchment: " + site.catchment.catchment_area_m2.toLocaleString() + " m\u00b2<br>" +
+        "Storage: " + site.pond_sizing.storage_capacity_m3.toLocaleString() + " m\u00b3"
+      );
+      markers.push(marker);
+    });
+
+    setTimeout(function () { map.invalidateSize(); }, 50);
+  }
+
+  function renderList(sites) {
+    siteList.innerHTML = "";
+    sites.forEach(function (site) {
+      var entry = document.createElement("div");
+      entry.className = "site-entry" + (site.rank === 1 ? " rank-1" : "");
+
+      var numeral = document.createElement("div");
+      numeral.className = "numeral";
+      numeral.textContent = String(site.rank).padStart(2, "0");
+      entry.appendChild(numeral);
+
+      var body = document.createElement("div");
+
+      var head = document.createElement("div");
+      head.className = "site-head";
+      var title = document.createElement("strong");
+      title.textContent = "Elevation " + site.elevation_m + "m";
+      head.appendChild(title);
+      if (site.rank === 1) {
+        var badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = "Best match";
+        head.appendChild(badge);
+      }
+      body.appendChild(head);
+
+      var stats = document.createElement("dl");
+      stats.className = "stat-grid";
+      var statPairs = [
+        ["Catchment area", site.catchment.catchment_area_m2.toLocaleString() + " m\u00b2"],
+        ["Recommended depth", site.pond_sizing.recommended_depth_m + " m"],
+        ["Storage capacity", site.pond_sizing.storage_capacity_m3.toLocaleString() + " m\u00b3"],
+        ["Distance from main channel", site.distance_from_main_channel_m + " m"]
+      ];
+      statPairs.forEach(function (pair) {
+        var dt = document.createElement("dt");
+        dt.textContent = pair[0];
+        var dd = document.createElement("dd");
+        dd.textContent = pair[1];
+        stats.appendChild(dt);
+        stats.appendChild(dd);
+      });
+      body.appendChild(stats);
+
+      var coords = document.createElement("div");
+      coords.className = "coords";
+      coords.textContent = site.latitude.toFixed(6) + ", " + site.longitude.toFixed(6);
+      body.appendChild(coords);
+
+      entry.appendChild(body);
+      siteList.appendChild(entry);
+    });
+  }
+})();
+</script>
+</body>
+</html>
