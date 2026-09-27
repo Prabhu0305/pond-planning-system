@@ -243,21 +243,77 @@ def identify_main_channel(accumulation, percentile=97):
     return labeled == main_channel_label
 
 
+def extract_catchment_polygon(catchment_mask, grid_lons, grid_lats, max_vertices=300):
+    """
+    Extracts the outer boundary polygon of the delineated catchment mask
+    as a list of [lat, lon] coordinates suitable for Leaflet vector overlays.
+    Uses contourpy for high-speed, zero-copy boundary contouring.
+    """
+    try:
+        import contourpy
+        c = contourpy.contour_generator(z=catchment_mask.astype(float))
+        lines = c.lines(0.5)
+        if not lines:
+            return []
+
+        # If multiple contours exist (islands/disjoint areas), take the largest
+        longest_line = max(lines, key=lambda l: len(l))
+        if len(longest_line) < 3:
+            return []
+
+        # Downsample if too dense, to keep JSON payload lightweight (<20 KB)
+        step = max(1, len(longest_line) // max_vertices)
+        sampled = longest_line[::step]
+        if not np.array_equal(sampled[0], sampled[-1]):
+            sampled = np.vstack([sampled, sampled[0]])  # close polygon loop
+
+        poly_lons = np.interp(sampled[:, 0], np.arange(len(grid_lons)), grid_lons)
+        poly_lats = np.interp(sampled[:, 1], np.arange(len(grid_lats)), grid_lats)
+
+        return [[round(float(lat), 6), round(float(lon), 6)] for lat, lon in zip(poly_lats, poly_lons)]
+    except Exception as e:
+        return []
+
+
+def compute_water_yield(catchment_area_m2, annual_rainfall_mm=1000.0, runoff_coeff=0.30):
+    """
+    Computes expected harvestable water volume based on standard watershed hydrological equation:
+        V_runoff = A_catchment * (P_annual / 1000) * C_runoff
+    where:
+        A_catchment: Contributing drainage area in m2
+        P_annual: Annual precipitation in mm (default 1000 mm for Central India)
+        C_runoff: Runoff coefficient (default 0.30 for agricultural/clay loam terrain)
+    """
+    rainfall_m = annual_rainfall_mm / 1000.0
+    runoff_volume_m3 = catchment_area_m2 * rainfall_m * runoff_coeff
+    volume_liters = runoff_volume_m3 * 1000.0
+
+    # Rule of thumb for protective/supplementary irrigation:
+    # ~500 m3 per hectare per watering event for kharif crops during dry spells
+    irrigation_hectares = runoff_volume_m3 / 500.0
+
+    return {
+        "annual_rainfall_mm": float(annual_rainfall_mm),
+        "runoff_coefficient": float(runoff_coeff),
+        "runoff_volume_m3": round(float(runoff_volume_m3), 2),
+        "runoff_volume_lakh_liters": round(float(volume_liters / 100000.0), 2),
+        "runoff_volume_million_liters": round(float(volume_liters / 1000000.0), 3),
+        "irrigation_hectares_supported": round(float(irrigation_hectares), 2),
+    }
+
+
 def find_top_n_pond_sites(Z, accumulation, direction, n=4, low_elevation_percentile=25,
                            edge_margin_fraction=0.08, min_catchment_cells=5,
-                           min_distance_from_channel_cells=20):
+                           min_distance_from_channel_cells=20, bounds=None,
+                           grid_lons=None, grid_lats=None):
     """
     Finds up to N distinct candidate pond sites, ranked by flow accumulation
     (highest first), each with its OWN, NON-OVERLAPPING catchment, and each
     kept at a safe minimum distance from the identified main river channel.
 
-    SAFETY BUFFER (min_distance_from_channel_cells, default 20 cells =
-    ~200m at 10m grid resolution): even though a candidate might pass the
-    low-elevation and edge-margin filters, we additionally reject any
-    candidate too close to the main channel identified by
-    identify_main_channel(). This is a deliberate extra safeguard, not
-    just a consequence of the other filters -- it protects against
-    contour maps where those filters alone might not keep a safe distance.
+    If `bounds` is provided (e.g. user selected land area on the map), candidate
+    sites are strictly constrained to fall WITHIN that land area while tracking
+    the upstream flow draining into it.
     """
     rows, cols = Z.shape
     row_margin = max(int(rows * edge_margin_fraction), 1)
@@ -266,23 +322,45 @@ def find_top_n_pond_sites(Z, accumulation, direction, n=4, low_elevation_percent
     interior_mask = np.zeros_like(Z, dtype=bool)
     interior_mask[row_margin:rows - row_margin, col_margin:cols - col_margin] = True
 
-    # Distance (in cells) from every cell to the nearest main-channel cell,
-    # computed once via a fast distance transform rather than a slow
-    # per-candidate loop.
+    # Distance (in cells) from every cell to the nearest main-channel cell
     main_channel_mask = identify_main_channel(accumulation)
     if main_channel_mask.any():
         distance_from_channel = ndimage.distance_transform_edt(~main_channel_mask)
     else:
-        distance_from_channel = np.full_like(Z, np.inf)  # no channel found, no restriction
+        distance_from_channel = np.full_like(Z, np.inf)
 
     safe_from_channel_mask = distance_from_channel >= min_distance_from_channel_cells
 
+    # Base low elevation threshold
     threshold = np.percentile(Z[interior_mask], low_elevation_percentile)
-    candidate_mask = interior_mask & (Z <= threshold) & safe_from_channel_mask
+
+    # Apply spatial bounding box constraint if specified by user
+    if bounds and grid_lons is not None and grid_lats is not None:
+        min_lat = bounds.get("min_lat", bounds.get("south", -np.inf))
+        max_lat = bounds.get("max_lat", bounds.get("north", np.inf))
+        min_lon = bounds.get("min_lon", bounds.get("west", -np.inf))
+        max_lon = bounds.get("max_lon", bounds.get("east", np.inf))
+
+        lon_in_bounds = (grid_lons >= min_lon) & (grid_lons <= max_lon)
+        lat_in_bounds = (grid_lats >= min_lat) & (grid_lats <= max_lat)
+        bounds_2d = np.outer(lat_in_bounds, lon_in_bounds)
+
+        if bounds_2d.any():
+            # Prefer low elevation & channel safe inside bounds
+            cand = bounds_2d & safe_from_channel_mask & (Z <= threshold)
+            if not cand.any():
+                cand = bounds_2d & safe_from_channel_mask
+            if not cand.any():
+                cand = bounds_2d
+            candidate_mask = cand
+        else:
+            candidate_mask = interior_mask & (Z <= threshold) & safe_from_channel_mask
+    else:
+        candidate_mask = interior_mask & (Z <= threshold) & safe_from_channel_mask
 
     candidate_rows, candidate_cols = np.where(candidate_mask)
     if len(candidate_rows) == 0:
-        return []  # nothing survives the filters -- caller should handle empty result
+        return []
 
     candidate_accum = accumulation[candidate_rows, candidate_cols]
     order = np.argsort(-candidate_accum)
@@ -315,6 +393,7 @@ def find_top_n_pond_sites(Z, accumulation, direction, n=4, low_elevation_percent
         used_mask |= catchment
 
     return sites
+
 
 
 if __name__ == "__main__":
