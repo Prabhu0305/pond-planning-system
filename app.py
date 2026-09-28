@@ -4,7 +4,7 @@ import sys
 import tempfile
 import zipfile
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 
 # The analysis/*.py files were written to be run standalone (e.g.
 # "python analysis/dem_builder.py"), and they import each other using
@@ -331,18 +331,56 @@ def planner():
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
+@app.route("/loadSample", methods=["GET", "POST"])
+def load_sample():
+    """
+    Loads and analyzes the default IIT Bhilai Village contours dataset from
+    sample_data/contours_1m.kmz. Automatically initializes TERRAIN_CACHE.
+    """
+    if "sample_result" in TERRAIN_CACHE:
+        return jsonify(TERRAIN_CACHE["sample_result"]), 200
+
+    sample_kmz = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sample_data", "contours_1m.kmz"
+    )
+    sample_kml = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sample_data", "contours_1m.kml"
+    )
+
+    kml_path = None
+    extracted_tmp = None
+    if os.path.exists(sample_kmz):
+        extracted_tmp = extract_kml_from_kmz(sample_kmz)
+        kml_path = extracted_tmp
+    elif os.path.exists(sample_kml):
+        kml_path = sample_kml
+    else:
+        return jsonify({"error": "Sample data file not found."}), 404
+
+    try:
+        rainfall_val = request.args.get("rainfall_mm") or (request.form.get("rainfall_mm") if request.form else None)
+        rainfall_mm = float(rainfall_val) if rainfall_val else 1000.0
+
+        runoff_val = request.args.get("runoff_coeff") or (request.form.get("runoff_coeff") if request.form else None)
+        runoff_coeff = float(runoff_val) if runoff_val else 0.30
+
+        result = run_full_analysis(
+            kml_path, rainfall_mm=rainfall_mm, runoff_coeff=runoff_coeff
+        )
+        TERRAIN_CACHE["sample_result"] = result
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to load sample: {str(e)}"}), 500
+    finally:
+        if extracted_tmp and os.path.exists(extracted_tmp):
+            os.remove(extracted_tmp)
+
+
 @app.route("/", methods=["GET"])
 def index():
-    return jsonify({
-        "message": "Pond Catchment Analysis API (Phase 3) is running.",
-        "endpoints": {
-            "POST /analyzeContour": "Upload .kml or .kmz contour file for complete terrain analysis",
-            "POST /analyzeArea": "Instant analysis (<100ms) for selected land area bounds on cached terrain",
-            "GET /planner": "Interactive GIS Web Interface with land area selection & catchment overlays",
-            "GET /health": "Cluster health status probe",
-        }
-    })
+    return redirect("/planner")
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3000, debug=False)
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host="0.0.0.0", port=port, debug=False)

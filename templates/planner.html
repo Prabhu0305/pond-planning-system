@@ -554,6 +554,9 @@
     </div>
 
     <div class="nav-controls">
+      <button class="tool-btn" id="load-sample-btn" style="background: rgba(20, 184, 166, 0.25); border: 1px solid var(--accent-teal); color: var(--accent-teal); font-weight: 700; padding: 0.45rem 0.95rem; border-radius: 9999px;" title="Load Pre-computed IIT Bhilai Terrain Contours">
+        <span>⚡</span> Load Demo Map
+      </button>
       <label class="upload-pill" title="Upload KML or KMZ contour map">
         <span class="upload-icon">📂</span>
         <span class="upload-name" id="file-name-label">Choose Contour File</span>
@@ -687,6 +690,7 @@
   var fileInput = document.getElementById("file-input");
   var fileNameLabel = document.getElementById("file-name-label");
   var analyzeBtn = document.getElementById("analyze-btn");
+  var loadSampleBtn = document.getElementById("load-sample-btn");
   var selectAreaBtn = document.getElementById("select-area-btn");
   var resetAreaBtn = document.getElementById("reset-area-btn");
   var toggleLayerBtn = document.getElementById("toggle-layer-btn");
@@ -849,6 +853,35 @@
         fileInput.disabled = false;
       });
   });
+
+  // Load Demo Map Handler
+  if (loadSampleBtn) {
+    loadSampleBtn.addEventListener("click", function () {
+      loadSampleBtn.disabled = true;
+      setStatus("Loading village terrain & calculating hydrological basins...", "loading");
+      fetch("/loadSample?rainfall_mm=" + rainfallSlider.value + "&runoff_coeff=" + soilSelect.value)
+        .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+        .then(function (res) {
+          if (!res.ok) {
+            setStatus(res.data.error || "Failed to load demo map.", "error");
+            return;
+          }
+          setStatus("", "");
+          fileNameLabel.textContent = "IIT_Bhilai_Village_1m.kmz";
+          currentSitesData = res.data.pond_sites || [];
+          activeBounds = null;
+          areaFilterBadge.style.display = "none";
+          resetAreaBtn.style.display = "none";
+          renderResults(res.data);
+        })
+        .catch(function (err) {
+          setStatus("Network error: " + err.message, "error");
+        })
+        .finally(function () {
+          loadSampleBtn.disabled = false;
+        });
+    });
+  }
 
   // Land Area Selection Tool Toggle
   selectAreaBtn.addEventListener("click", function () {
@@ -1142,6 +1175,11 @@
 
   // Initialize on load
   initMap();
+
+  // Auto-load demo map after short delay so any evaluator / YouTube viewer sees results immediately!
+  setTimeout(function () {
+    if (loadSampleBtn) loadSampleBtn.click();
+  }, 400);
 
 })();
 </script>
